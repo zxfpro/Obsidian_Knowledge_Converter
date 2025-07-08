@@ -24,3 +24,4 @@ plugins:
 
 nav:
   - Index: index.md
+  - 使用教程: 使用教程.md
