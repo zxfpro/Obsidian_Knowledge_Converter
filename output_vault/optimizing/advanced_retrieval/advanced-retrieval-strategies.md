@@ -1,3 +1,14 @@
-# Advanced Retrieval Strategies
+---
+title: Advanced Retrieval Strategies
+aliases:
+- advanced-retrieval-strategies
+describe: Some top-level content for adv_retrieval.md. See [Query Transformations
+  Docs](../../optimizing/advan
+type: ''
+ends: ''
+version: ''
+over: ''
+tags: []
+---
 
-Some top-level content for adv_retrieval.md. See [Query Transformations Docs](../../optimizing/advanced_retrieval/query_transformations.md).
+[[advanced-retrieval-query-transformations-1]]

@@ -56,10 +56,9 @@ class ObsidianConverter:
         title = file_data.get("title", "Untitled")
         children_raw = file_data.get("children", [])
 
-        main_file_slug = self.sanitizer.get_unique_filename(title)
-        main_obsidian_link_name = main_file_slug
+        main_obsidian_link_name = self.sanitizer.get_unique_filename(title)
 
-        original_path_key = original_file_full_path.with_suffix('').as_posix()
+        original_path_key = original_file_full_path.as_posix() # 使用完整路径作为key
         GLOBAL_LINK_MAP[original_path_key] = main_obsidian_link_name
 
         for child_data in children_raw:
@@ -72,10 +71,17 @@ class ObsidianConverter:
         title = section_data.get("title", "Untitled Section")
         children_raw = section_data.get("children", [])
 
-        section_slug = self.sanitizer.get_unique_filename(f"{parent_obsidian_link_name}-{title}")
-        section_obsidian_link_name = section_slug
+        # DCN中建议的命名规则：f"{original_filename_base}-{child_content_data.title}"
+        # 这里需要根据实际情况调整，确保唯一性
+        # 对于子章节，其原始路径可以表示为 "原始文件路径#章节标题"
+        section_original_path_key = f"{original_file_full_path.as_posix()}#{title}"
+        
+        # 生成子章节的 Obsidian 链接名，确保唯一性
+        # 这里使用原始文件名的stem作为前缀，加上章节标题
+        original_filename_base = original_file_full_path.stem
+        suggested_filename_base = f"{original_filename_base}-{title}"
+        section_obsidian_link_name = self.sanitizer.get_unique_filename(suggested_filename_base)
 
-        section_original_path_key = f"{original_file_full_path.with_suffix('').as_posix()}-{title}"
         GLOBAL_LINK_MAP[section_original_path_key] = section_obsidian_link_name
 
         for child_data in children_raw:
@@ -104,22 +110,31 @@ class ObsidianConverter:
         """
         生成单个文件节点的内容。
         """
-        title = file_data.get("title", "Untitled")
-        content = file_data.get("content", "")
+        main_title = file_data.get("title", "Untitled")
+        raw_content_for_describe = file_data.get("content", "")
         children_raw = file_data.get("children", [])
 
-        # 从GLOBAL_LINK_MAP中获取slug文件名和Obsidian链接名
-        original_path_key = original_file_full_path.with_suffix('').as_posix()
-        main_obsidian_link_name = GLOBAL_LINK_MAP.get(original_path_key, self.sanitizer._slugify(title)) # Fallback if not found
+        original_path_key = original_file_full_path.as_posix()
+        main_obsidian_link_name = GLOBAL_LINK_MAP.get(original_path_key, self.sanitizer._slugify(main_title))
 
-        # 重写主文件内容中的链接
-        rewritten_content = self.link_rewriter.rewrite_links(content, original_file_full_path)
+        child_links_markdown = []
+        for child_data in children_raw:
+            child_original_path_key = f"{original_file_full_path.as_posix()}#{child_data.get('title')}"
+            child_obsidian_link_name = GLOBAL_LINK_MAP.get(child_original_path_key)
+            if child_obsidian_link_name: # 确保链接名存在
+                child_links_markdown.append(f"[[{child_obsidian_link_name}]]")
+        
+        content_body = "\n".join(child_links_markdown)
 
-        # 生成主文件
         output_filepath = current_output_path / f"{main_obsidian_link_name}.md"
-        self.generator.generate_file(output_filepath, title, rewritten_content)
+        self.generator.generate_file(
+            filepath=output_filepath,
+            main_title=main_title,
+            content_body=content_body,
+            raw_content_for_describe=raw_content_for_describe,
+            aliases=[main_obsidian_link_name]
+        )
 
-        # 递归处理子标题
         for child_data in children_raw:
             self._generate_section_content(child_data, current_output_path, original_file_full_path, main_obsidian_link_name)
 
@@ -127,25 +142,30 @@ class ObsidianConverter:
         """
         生成单个章节的内容。
         """
-        title = section_data.get("title", "Untitled Section")
-        content = section_data.get("content", "")
+        section_title = section_data.get("title", "Untitled Section")
+        raw_content_for_describe = section_data.get("content", "")
         children_raw = section_data.get("children", [])
 
-        # 从GLOBAL_LINK_MAP中获取slug文件名和Obsidian链接名
-        section_original_path_key = f"{original_file_full_path.with_suffix('').as_posix()}-{title}"
-        section_obsidian_link_name = GLOBAL_LINK_MAP.get(section_original_path_key, self.sanitizer._slugify(f"{parent_obsidian_link_name}-{title}")) # Fallback
+        section_original_path_key = f"{original_file_full_path.as_posix()}#{section_title}"
+        section_obsidian_link_name = GLOBAL_LINK_MAP.get(section_original_path_key) # 直接从GLOBAL_LINK_MAP获取
 
-        # 重写章节内容中的链接
-        rewritten_content = self.link_rewriter.rewrite_links(content, original_file_full_path)
+        grandchild_links_markdown = []
+        for grandchild_data in children_raw:
+            grandchild_original_path_key = f"{original_file_full_path.as_posix()}#{grandchild_data.get('title')}"
+            grandchild_obsidian_link_name = GLOBAL_LINK_MAP.get(grandchild_original_path_key)
+            if grandchild_obsidian_link_name: # 确保链接名存在
+                grandchild_links_markdown.append(f"[[{grandchild_obsidian_link_name}]]")
+        
+        content_body = "\n".join(grandchild_links_markdown)
 
-        # 生成父级链接
-        parent_links = [f"Parent File: [[{parent_obsidian_link_name}]]"]
-        # 如果有更深层次的父级，可以在这里添加
-
-        # 生成章节文件
         output_filepath = current_output_path / f"{section_obsidian_link_name}.md"
-        self.generator.generate_file(output_filepath, title, rewritten_content, parent_links)
+        self.generator.generate_file(
+            filepath=output_filepath,
+            main_title=section_title,
+            content_body=content_body,
+            raw_content_for_describe=raw_content_for_describe,
+            aliases=[section_obsidian_link_name]
+        )
 
-        # 递归处理子章节
         for child_data in children_raw:
             self._generate_section_content(child_data, current_output_path, original_file_full_path, section_obsidian_link_name)

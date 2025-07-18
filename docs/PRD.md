@@ -107,3 +107,261 @@
 ---
 
 这份 PRD 涵盖了我们目前讨论的所有关键点。您可以审阅一下，看看是否有需要补充、修改或澄清的地方。
+
+
+
+# **更新后的 PRD (Product Requirements Document)**
+
+## Python 包开发指南：Obsidian Knowledge Converter
+
+### 1. 项目启动与规划
+
+#### 1.1 明确项目目标
+
+*   **输入**: `KnowledgeIngestor` 生成的 JSON 数据。
+*   **输出**: 符合 Obsidian 规范的 Markdown 文件集合，具备原子化知识单元、强化双向链接和标准化 Frontmatter。
+*   **核心转换逻辑**: 将 JSON 中的文件内部标题结构“原子化”为独立文件，并通过双链关联。同时，将原始文档内容转换为元数据和导航链接。
+
+#### 1.2 规划项目结构
+
+*   **建议的模块划分**: 将功能分解为逻辑清晰、职责单一的模块。
+    *   `converter.py`: 主协调器，包含核心转换流程。
+    *   `models.py`: 定义内部数据模型，如 `ContentData` 和 `ProcessedNode`，用于数据传递。
+    *   `sanitizers.py`: 负责文件名合法化（slugify）和去重。
+    *   `link_rewriter.py`: 负责解析和转换 Markdown 内部链接为 Obsidian 双链。
+    *   `generator.py`: 负责将处理后的内容写入文件系统，包含 YAML Frontmatter 的生成。
+*   **目录结构**: 遵循 Python 包的惯例，设置 `src` 或直接在顶层创建包名目录。包含 `tests/` 和 `examples/` 目录。
+*   **环境管理**: 推荐使用 `venv` 或 `Poetry` 进行依赖管理。
+
+#### 1.3 工具选择
+
+*   **语言**: Python 3.x
+*   **依赖**: 优先使用标准库。新增 `PyYAML` 用于 YAML Frontmatter 的生成。对于更复杂的 Markdown 解析，可考虑 `markdown-it-py` 或 `mistune`（但初期可手动处理）。
+*   **测试**: `pytest`。
+*   **代码质量**: `black` (格式化), `flake8` (linting)。
+
+### 2. 核心模块设计与开发
+
+本节将重申设计文档中核心模块的职责，并给出其在开发指南中的定位。
+
+#### 2.1 模块概览 (UML 类图)
+
+以下是本项目核心类的协作关系和职责概述，指导开发者理解模块间的交互：
+
+```mermaid
+classDiagram
+    class ObsidianConverter {
+        -output_root: Path
+        -sanitizer: FilenameSanitizer
+        -link_rewriter: LinkRewriter
+        -generator: MarkdownGenerator
+        +__init__(output_root: str)
+        +convert(input_json: Dict)
+        -process_node(node_data: Dict, current_output_path: Path, current_original_path: Path)
+        -process_file(file_data: Dict, current_output_path: Path, original_file_full_path: Path)
+        -process_section(section_data: Dict, current_output_path: Path, original_file_full_path: Path, parent_obsidian_link_name: str)
+    }
+    class FilenameSanitizer {
+        -generated_filenames: Set[str]
+        +__init__()
+        +get_unique_filename(desired_name: str) -> str
+        +reset()
+        -_slugify(text: str) -> str
+    }
+    class LinkRewriter {
+        -global_link_map: Dict[str, str]
+        +__init__(global_link_map: Dict[str, str])
+        +rewrite_links(markdown_content: str, current_file_original_path: Path) -> str
+    }
+    class MarkdownGenerator {
+        +generate_file(filepath: Path, main_title: str, content_body: str, raw_content_for_describe: str, aliases: List[str], frontmatter_fields: Dict[str, Any])
+    }
+    class ContentData {
+        +title: str
+        +level: int
+        +content: str
+        +children_raw: List[Dict]
+        +original_filename: str
+        +parent_title: str
+        +obsidian_link_name: str
+        +output_slug_filename: str
+        +output_filepath: Path
+    }
+    class ProcessedNode {
+        +name: str
+        +type: str
+        +relative_path: Path
+        +children: List[ProcessedNode]
+        +content_data: ContentData
+    }
+    ObsidianConverter "1" -- "1" FilenameSanitizer
+    ObsidianConverter "1" -- "1" LinkRewriter
+    ObsidianConverter "1" -- "1" MarkdownGenerator
+    LinkRewriter "1" -- "1" GLOBAL_LINK_MAP # GLOBAL_LINK_MAP is a shared state, not a class instance
+    ObsidianConverter ..> ContentData : uses
+    ObsidianConverter ..> ProcessedNode : uses
+```
+
+#### 2.2 数据模型定义 (`models.py`)
+
+*   **目的**: 封装和标准化在转换过程中传递的数据。
+*   **开发要点**:
+    *   定义 `ContentData` 类：用于表示文件或内部标题块的内容。
+    *   定义 `ProcessedNode` 类：用于表示 JSON 中的文件或文件夹节点。
+    *   **关键设计**: 引入一个全局字典 `GLOBAL_LINK_MAP: Dict[str, str]`，作为 `original_path` 到 `obsidian_link_name` 的映射。这个字典将在转换过程中动态填充，并供 `LinkRewriter` 使用。
+
+#### 2.3 文件名处理 (`sanitizers.py`)
+
+*   **目的**: 确保所有生成的文件名合法且唯一。
+*   **开发要点**:
+    *   **`_slugify(text: str)` 函数**: 将文本转换为文件系统友好的“slug”形式。
+        *   **示例**: `"Chapter 1: Intro to AI/ML?"` -> `"chapter-1-intro-to-ai-ml"`
+        *   **示例**: `"我的新知识！"` -> `"我的新知识"` (如果允许 Unicode)
+    *   **`get_unique_filename(desired_name: str)` 函数**: 在 `_slugify` 的基础上，处理命名冲突，通过添加 `_1`, `_2` 等后缀确保唯一性。
+
+#### 2.4 Markdown 生成 (`generator.py`)
+
+*   **目的**: 负责将处理好的内容写入磁盘，并生成符合 Obsidian 规范的 YAML Frontmatter。
+*   **开发要点**:
+    *   **`generate_file(filepath: Path, main_title: str, content_body: str, raw_content_for_describe: str, aliases: Optional[List[str]] = None, frontmatter_fields: Optional[Dict[str, Any]] = None)` 方法**:
+        *   根据提供的路径、主标题、文件主体内容 (`content_body`)、原始描述内容 (`raw_content_for_describe`) 和 Frontmatter 字段，生成 `.md` 文件。
+        *   文件顶部将包含以 `---` 包裹的 YAML Frontmatter，字段包括 `title`, `aliases`, `describe` (截取 `raw_content_for_describe` 前 100 字)，以及预留的 `type`, `ends`, `version`, `over`, `tags` (目前置空)。
+        *   Frontmatter 之后是 `content_body`，其将包含指向子标题的 Obsidian 双链。
+
+#### 2.5 链接重写 (`link_rewriter.py`)
+
+*   **目的**: 将原始 Markdown 内容中的相对路径链接转换为 Obsidian 双链。
+*   **开发要点**:
+    *   **`rewrite_links(markdown_content: str, current_file_original_path: Path) -> str` 方法**:
+        *   **核心挑战：路径解析**: 这是该模块的难点。需要解析 Markdown 链接中的 `url`。如果 `url` 是相对路径（如 `../../path/to/file.md`），则需要结合 `current_file_original_path` (当前正在处理的原始文件的完整相对路径，例如 `optimizing/advanced_retrieval/advanced_retrieval.md`)，使用 `pathlib` 等工具将其解析为在 `GLOBAL_LINK_MAP` 中能查找的规范化路径。
+        *   **查找与转换**: 使用解析后的规范化路径作为键，在 `GLOBAL_LINK_MAP` 中查找对应的 Obsidian 链接名。如果找到，将 `[text](url)` 转换为 `[[Obsidian Link Name|text]]`。
+        *   **保留**: 外部链接 (`http://`, `https://`) 和未找到映射的内部链接应保持不变。
+        *   **避免修改代码块**: 确保链接重写逻辑不会修改 Markdown 代码块内部的内容。
+
+#### 2.6 核心转换逻辑 (`converter.py`)
+
+*   **目的**: 协调所有模块，实现整个 JSON 到 Markdown 的转换流程，并根据新的结构化要求构建文件内容。
+*   **开发要点**:
+    *   **`ObsidianConverter` 类**: 作为主入口，协调 `sanitizer`, `link_rewriter`, `generator` 的工作。
+    *   **递归处理**: 实现 `_process_node`, `_process_file`, `_process_section` 等递归方法。
+        *   `_process_node`: 处理文件夹和文件节点，维护 `current_output_path` 和 `current_original_path`。
+        *   `_process_file`: 处理单个文件节点，生成其主 Markdown 文件，并启动对其内部子标题的递归处理。
+            *   **关键**: 在此阶段，将原始文件的完整相对路径和其生成的 Obsidian 链接名添加到 `GLOBAL_LINK_MAP`。
+            *   **内容构建**: 提取 `level=1` 的内容作为 `describe` 的原始文本。遍历其子标题，计算并收集它们的 Obsidian 链接，作为主文件的 `content_body`。
+        *   `_process_section`: 处理文件内部的每个子标题，将其生成为独立 Markdown 文件。
+            *   **关键**: 在此阶段，将生成的章节文件对应的规范化路径（例如 `optimizing/advanced_retrieval/advanced-retrieval-query-transformations.md`）和其 Obsidian 链接名添加到 `GLOBAL_LINK_MAP`。
+            *   **内容构建**: 提取当前章节的原始内容作为 `describe` 的原始文本。遍历其子标题（如果有），计算并收集它们的 Obsidian 链接，作为当前章节文件的 `content_body`。
+            *   **移除父级链接**: 不再生成任何 `Parent File` 或 `Parent Section` 链接。
+
+### 3. 转换流程示例 (输入 -> 输出)
+
+为了更直观地理解转换过程，我们重温之前的示例，并展示新的输出格式：
+
+#### 3.1 示例输入 (简化版 JSON 片段)
+
+```json
+{
+    "name": "optimizing",
+    "type": "folder",
+    "children": [
+        {
+            "name": "advanced_retrieval",
+            "type": "folder",
+            "children": [
+                {
+                    "name": "advanced_retrieval.md",
+                    "type": "file",
+                    "content": {
+                        "title": "Advanced Retrieval Strategies",
+                        "level": 1,
+                        "content": "Some top-level content for adv_retrieval.md.",
+                        "children": [
+                            {
+                                "title": "Query Transformations",
+                                "level": 2,
+                                "content": "Info about query transformations. See [Query Transformations Docs](../../optimizing/advanced_retrieval/query_transformations.md).",
+                                "children": []
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    ]
+}
+```
+
+#### 3.2 示例输出 (对应的文件结构与内容)
+
+假设输出根目录为 `output_vault`。
+
+```
+output_vault/
+├── optimizing/
+│   └── advanced_retrieval/
+│       ├── advanced-retrieval.md
+│       └── advanced-retrieval-query-transformations.md
+```
+
+**文件内容示例：`output_vault/optimizing/advanced_retrieval/advanced-retrieval.md`**
+
+```markdown
+---
+title: Advanced Retrieval Strategies
+aliases: [advanced-retrieval]
+describe: "Some top-level content for adv_retrieval.md."
+type:
+ends:
+version:
+over:
+tags: []
+---
+[[advanced-retrieval-query-transformations]]
+```
+
+**文件内容示例：`output_vault/optimizing/advanced_retrieval/advanced-retrieval-query-transformations.md`**
+
+```markdown
+---
+title: Query Transformations
+aliases: [advanced-retrieval-query-transformations]
+describe: "Info about query transformations. See [Query Transformations Docs](../../optimizing/advanced_retrieval/query_transformations.md)."
+type:
+ends:
+version:
+over:
+tags: []
+---
+```
+
+**`GLOBAL_LINK_MAP` 中的可能条目 (部分)**：
+
+*   `"optimizing/advanced_retrieval/advanced_retrieval.md"` : `"advanced-retrieval"`
+*   `"optimizing/advanced_retrieval/advanced_retrieval-Query Transformations"` : `"advanced-retrieval-query-transformations"`
+*   `"optimizing/advanced_retrieval/query_transformations.md"` : `"query-transformations"` (假设这个文件在整个 JSON 结构中存在)
+
+### 4. 测试策略
+
+*   **单元测试**: 为 `sanitizers`, `link_rewriter` (其功能不变), `generator` 模块编写独立测试。
+*   **集成测试**: 模拟完整的 JSON 输入，验证输出目录结构、文件内容、YAML Frontmatter 和链接的正确性。
+*   **边缘情况测试**: 涵盖空内容、特殊字符、重名、深层嵌套、无子标题等场景。
+
+### 5. 改进与完善
+
+*   **错误处理**: 增加健壮的错误捕获和日志记录。
+*   **配置项**: 允许用户自定义输出路径、链接格式、拆分级别、Frontmatter 字段内容等。
+*   **性能优化**: 针对大型知识库进行优化。
+*   **文档**: 编写清晰的 `README.md` 和 API 文档。
+*   **打包**: 准备发布到 PyPI。
+
+### 6. 开发流程建议
+
+1.  **自底向上，逐步迭代**:
+    *   从 `models.py` 开始，定义好数据结构。
+    *   接着实现 `sanitizers.py` 和 `generator.py` (包含 YAML Frontmatter 逻辑)，并确保它们工作正常。
+    *   **攻克 `link_rewriter.py`**: 这是最复杂的部分，尤其是其路径解析逻辑。务必确保其能够正确地将相对路径转换为 `GLOBAL_LINK_MAP` 中的键。
+    *   最后构建 `converter.py`，将所有模块集成起来，从简单的 JSON 输入开始，逐步增加复杂性，特别关注新的内容构建逻辑。
+2.  **测试先行**: 每完成一个小的功能点，立即编写并运行单元测试。
+3.  **版本控制**: 始终使用 Git。
+
+---
